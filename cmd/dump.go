@@ -16,10 +16,20 @@ limitations under the License.
 package cmd
 
 import (
-	"fmt"
+	"database/sql"
+	"log"
+	"time"
 
+	// mysql driver
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 )
+
+type Title struct {
+	name string
+	from time.Time
+	to   time.Time
+}
 
 // dumpCmd represents the dump command
 var dumpCmd = &cobra.Command{
@@ -32,7 +42,7 @@ Cobra is a CLI library for Go that empowers applications.
 This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("dump called")
+		openDatabase()
 	},
 }
 
@@ -48,4 +58,34 @@ func init() {
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
 	// dumpCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+}
+
+func openDatabase() {
+	db, err := sql.Open("mysql", "guest:relational@tcp(relational.fit.cvut.cz:3306)/employee?parseTime=true")
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("connection established")
+	var (
+		empNo  int
+		title  string
+		from   time.Time
+		to     time.Time
+		titles []Title
+	)
+	rows, err := db.Query("select * from titles where emp_no = ?", 110344)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for rows.Next() {
+		err := rows.Scan(&empNo, &title, &from, &to)
+		if err != nil {
+			log.Fatal(err)
+		}
+		titles = append(titles, Title{title, from, to})
+	}
+	for _, ttl := range titles {
+		log.Printf("%s - %s to %s", ttl.name, ttl.from, ttl.to)
+	}
+	defer db.Close()
 }
