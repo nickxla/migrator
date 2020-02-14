@@ -1,0 +1,21 @@
+version: "3.7"
+services:
+    mongo:
+        image: mongo
+        restart: always
+        environment: 
+            MONGO_INITDB_ROOT_USERNAME: admin
+            MONGO_INITDB_ROOT_PASSWORD: admin
+        ports:
+            - 27017:27017
+
+    mysql:
+        build: .
+        restart: always
+        environment:
+            MYSQL_ROOT_PASSWORD: nottheactualpassword
+            MYSQL_DATABASE: employee
+        volumes:
+            - ./dump:/dump
+        ports:
+            - 3306:3306

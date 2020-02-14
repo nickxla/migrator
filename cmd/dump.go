@@ -49,19 +49,21 @@ to quickly create a Cobra application.`,
 		if err != nil {
 			panic(err)
 		}
-		ids = ids[:50]
 		log.Printf("Length of ids.txt : %d", len(ids))
-
 		var (
 			wg        sync.WaitGroup
 			employees []Employee
 		)
 		ch := make(chan Employee)
+		db, err := sql.Open("mysql", "root:nottheactualpassword@tcp(localhost:3306)/employee?parseTime=true")
+		defer db.Close()
+		db.SetMaxOpenConns(175)
+		db.SetMaxIdleConns(100)
 
 		start := time.Now()
 		for _, id := range ids {
 			wg.Add(1)
-			go DumpEmployee(id, &wg, ch)
+			go DumpEmployee(id, &wg, ch, db)
 		}
 
 		go func() {
@@ -72,7 +74,11 @@ to quickly create a Cobra application.`,
 
 		wg.Wait()
 		close(ch)
-		InsertMany(employees)
+		fmt.Println()
+		/*
+			log.Printf("Collected %d employees", len(employees))
+			log.Printf("Starting dumping into mongodb")
+			InsertMany(employees) */
 		elapsed := time.Since(start)
 
 		log.Printf("Dumped %d employees in %s", len(employees), elapsed)
@@ -131,12 +137,7 @@ func GetManagerTitle(rows *sql.Rows, from time.Time, to time.Time) bool {
 	return false
 }
 
-func DumpTitles(id int) []Title {
-	db, err := sql.Open("mysql", "guest:relational@tcp(relational.fit.cvut.cz:3306)/employee?parseTime=true")
-	defer db.Close()
-	if err != nil {
-		log.Fatal(err)
-	}
+func DumpTitles(id int, db *sql.DB) []Title {
 	var (
 		empNo  int
 		title  string
@@ -160,12 +161,7 @@ func DumpTitles(id int) []Title {
 	return titles
 }
 
-func DumpSalaries(id int) []Salary {
-	db, err := sql.Open("mysql", "guest:relational@tcp(relational.fit.cvut.cz:3306)/employee?parseTime=true")
-	defer db.Close()
-	if err != nil {
-		log.Fatal(err)
-	}
+func DumpSalaries(id int, db *sql.DB) []Salary {
 	var (
 		amount   int
 		from     time.Time
@@ -186,13 +182,8 @@ func DumpSalaries(id int) []Salary {
 	return salaries
 }
 
-func DumpEmployee(id int, wg *sync.WaitGroup, ch chan Employee) {
+func DumpEmployee(id int, wg *sync.WaitGroup, ch chan Employee, db *sql.DB) {
 	defer wg.Done()
-	db, err := sql.Open("mysql", "guest:relational@tcp(relational.fit.cvut.cz:3306)/employee?parseTime=true")
-	defer db.Close()
-	if err != nil {
-		log.Fatal(err)
-	}
 	var (
 		empNo     int
 		birthDate time.Time
@@ -202,22 +193,18 @@ func DumpEmployee(id int, wg *sync.WaitGroup, ch chan Employee) {
 		hireDate  time.Time
 	)
 	row := db.QueryRow("select * from employees where emp_no = ?", id)
-	err = row.Scan(&empNo, &birthDate, &firstName, &lastName, &gender, &hireDate)
+	err := row.Scan(&empNo, &birthDate, &firstName, &lastName, &gender, &hireDate)
 	if err != nil {
 		log.Fatal(err)
 	}
-	titles := DumpTitles(id)
-	salaries := DumpSalaries(id)
-	current, history := DumpDepartments(id)
+	titles := DumpTitles(id, db)
+	salaries := DumpSalaries(id, db)
+	current, history := DumpDepartments(id, db)
+	fmt.Printf("\r Dumped emp no. %d", id)
 	ch <- Employee{empNo, birthDate, firstName, lastName, gender, hireDate, titles, salaries, current, history}
 }
 
-func DumpDepartments(id int) (Department, []Department) {
-	db, err := sql.Open("mysql", "guest:relational@tcp(relational.fit.cvut.cz:3306)/employee?parseTime=true")
-	defer db.Close()
-	if err != nil {
-		log.Fatal(err)
-	}
+func DumpDepartments(id int, db *sql.DB) (Department, []Department) {
 	var (
 		number  string
 		from    time.Time
@@ -250,8 +237,8 @@ func DumpDepartments(id int) (Department, []Department) {
 
 func InsertMany(employees []Employee) {
 	// Declare host and port options to pass to the Connect() method
-	mongoUri := fmt.Sprintf("mongodb+srv://%s:%s@cluster0-aub80.mongodb.net/test?retryWrites=true&w=majority", os.Getenv("MONGO_USER", os.Getenv("MONGO_PASSWORD")))
-	clientOptions := options.Client().ApplyURI(mongoUri)
+	mongoURI := fmt.Sprintf("mongodb://%s:%s@localhost:27017", os.Getenv("MONGO_USER"), os.Getenv("MONGO_PASSWORD"))
+	clientOptions := options.Client().ApplyURI(mongoURI)
 
 	// Connect to the MongoDB and return Client instance
 	client, err := mongo.Connect(context.TODO(), clientOptions)
