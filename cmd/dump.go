@@ -19,12 +19,17 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/cheggaaa/pb/v3"
 
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -33,6 +38,8 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 )
+
+var db *sql.DB
 
 // dumpCmd represents the dump command
 var dumpCmd = &cobra.Command{
@@ -49,21 +56,33 @@ to quickly create a Cobra application.`,
 		if err != nil {
 			panic(err)
 		}
+		ids = ids[:10000]
 		log.Printf("Length of ids.txt : %d", len(ids))
 		var (
 			wg        sync.WaitGroup
 			employees []Employee
 		)
 		ch := make(chan Employee)
-		db, err := sql.Open("mysql", "root:nottheactualpassword@tcp(localhost:3306)/employee?parseTime=true")
+		db, err = sql.Open("mysql", "root:nottheactualpassword@tcp(localhost:3306)/employee?parseTime=true")
 		defer db.Close()
-		db.SetMaxOpenConns(175)
-		db.SetMaxIdleConns(100)
+		db.SetMaxOpenConns(250)
+		db.SetMaxIdleConns(runtime.NumCPU() * 8)
 
 		start := time.Now()
+		total := 0
+		bar := pb.StartNew(len(ids))
 		for _, id := range ids {
 			wg.Add(1)
-			go DumpEmployee(id, &wg, ch, db)
+			go func(id int, ch chan Employee) {
+				defer wg.Done()
+				deptManagers := DumpDeptManager(id)
+				titles := DumpTitles(id, deptManagers)
+				salaries := DumpSalaries(id)
+				current, history := DumpDepartments(id)
+				DumpEmployee(id, ch, titles, salaries, current, history)
+				total++
+				bar.Increment()
+			}(id, ch)
 		}
 
 		go func() {
@@ -74,11 +93,11 @@ to quickly create a Cobra application.`,
 
 		wg.Wait()
 		close(ch)
+		bar.Finish()
 		fmt.Println()
-		/*
-			log.Printf("Collected %d employees", len(employees))
-			log.Printf("Starting dumping into mongodb")
-			InsertMany(employees) */
+		//ToJson(employees)
+		log.Printf("Starting dumping into mongodb")
+		//InsertMany(employees)
 		elapsed := time.Since(start)
 
 		log.Printf("Dumped %d employees in %s", len(employees), elapsed)
@@ -97,6 +116,11 @@ func init() {
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
 	// dumpCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+}
+
+func ToJson(emps []Employee) {
+	file, _ := json.MarshalIndent(emps, "", "")
+	_ = ioutil.WriteFile("test.json", file, 0644)
 }
 
 func InitIds() ([]int, error) {
@@ -118,26 +142,40 @@ func InitIds() ([]int, error) {
 	return ids, scanner.Err()
 }
 
-func GetManagerTitle(rows *sql.Rows, from time.Time, to time.Time) bool {
-	var (
-		deptNo   string
-		empNo    int
-		fromDate time.Time
-		toDate   time.Time
-	)
-	for rows.Next() {
-		err := rows.Scan(&deptNo, &empNo, &fromDate, &toDate)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if fromDate == from && toDate == to {
+func GetManagerTitle(deptManagers []Department, from time.Time, to time.Time) bool {
+	for _, dept := range deptManagers {
+		if dept.From == from && dept.To == to {
 			return true
 		}
 	}
 	return false
 }
 
-func DumpTitles(id int, db *sql.DB) []Title {
+func DumpDeptManager(id int) []Department {
+	var (
+		number string
+		empNo  int
+		from   time.Time
+		to     time.Time
+		depts  []Department
+	)
+	rows, err := db.Query("select * from dept_manager where emp_no = ?", id)
+	defer rows.Close()
+	if err != nil {
+		log.Fatal(err)
+	}
+	for rows.Next() {
+		err := rows.Scan(&number, &empNo, &from, &to)
+		if err != nil {
+			log.Fatal(err)
+		}
+		depts = append(depts, Department{number, "", from, to})
+	}
+	rows.Close()
+	return depts
+}
+
+func DumpTitles(id int, deptManagers []Department) []Title {
 	var (
 		empNo  int
 		title  string
@@ -146,10 +184,10 @@ func DumpTitles(id int, db *sql.DB) []Title {
 		titles []Title
 	)
 	rows, err := db.Query("select * from titles where emp_no = ?", id)
+	defer rows.Close()
 	if err != nil {
 		log.Fatal(err)
 	}
-	deptManagers, err := db.Query("select * from dept_manager where emp_no = ?", id)
 	for rows.Next() {
 		err := rows.Scan(&empNo, &title, &from, &to)
 		if err != nil {
@@ -158,10 +196,11 @@ func DumpTitles(id int, db *sql.DB) []Title {
 		isManager := GetManagerTitle(deptManagers, from, to)
 		titles = append(titles, Title{title, from, to, isManager})
 	}
+	rows.Close()
 	return titles
 }
 
-func DumpSalaries(id int, db *sql.DB) []Salary {
+func DumpSalaries(id int) []Salary {
 	var (
 		amount   int
 		from     time.Time
@@ -169,6 +208,7 @@ func DumpSalaries(id int, db *sql.DB) []Salary {
 		salaries []Salary
 	)
 	rows, err := db.Query("select salary, from_date, to_date from salaries where emp_no = ?", id)
+	defer rows.Close()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -179,11 +219,11 @@ func DumpSalaries(id int, db *sql.DB) []Salary {
 		}
 		salaries = append(salaries, Salary{amount, from, to})
 	}
+	rows.Close()
 	return salaries
 }
 
-func DumpEmployee(id int, wg *sync.WaitGroup, ch chan Employee, db *sql.DB) {
-	defer wg.Done()
+func DumpEmployee(id int, ch chan Employee, titles []Title, salaries []Salary, current Department, history []Department) {
 	var (
 		empNo     int
 		birthDate time.Time
@@ -192,19 +232,22 @@ func DumpEmployee(id int, wg *sync.WaitGroup, ch chan Employee, db *sql.DB) {
 		gender    string
 		hireDate  time.Time
 	)
-	row := db.QueryRow("select * from employees where emp_no = ?", id)
-	err := row.Scan(&empNo, &birthDate, &firstName, &lastName, &gender, &hireDate)
+	rows, err := db.Query("select * from employees where emp_no = ?", id)
+	defer rows.Close()
 	if err != nil {
 		log.Fatal(err)
 	}
-	titles := DumpTitles(id, db)
-	salaries := DumpSalaries(id, db)
-	current, history := DumpDepartments(id, db)
-	fmt.Printf("\r Dumped emp no. %d", id)
+	for rows.Next() {
+		err := rows.Scan(&empNo, &birthDate, &firstName, &lastName, &gender, &hireDate)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	rows.Close()
 	ch <- Employee{empNo, birthDate, firstName, lastName, gender, hireDate, titles, salaries, current, history}
 }
 
-func DumpDepartments(id int, db *sql.DB) (Department, []Department) {
+func DumpDepartments(id int) (Department, []Department) {
 	var (
 		number  string
 		from    time.Time
@@ -214,6 +257,7 @@ func DumpDepartments(id int, db *sql.DB) (Department, []Department) {
 		history []Department
 	)
 	rows, err := db.Query("SELECT dpe.dept_no, from_date, to_date, dept_name FROM dept_emp dpe INNER JOIN departments d ON dpe.dept_no = d.dept_no WHERE emp_no = ? ORDER BY to_date", id)
+	defer rows.Close()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -232,6 +276,7 @@ func DumpDepartments(id int, db *sql.DB) (Department, []Department) {
 	if current == (Department{}) {
 		current = Department{"d000", "Retired", from, to}
 	}
+	rows.Close()
 	return current, history
 }
 
