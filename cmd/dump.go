@@ -29,12 +29,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cheggaaa/pb/v3"
-
 	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 
 	// mysql driver
+	"github.com/cheggaaa/pb"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 )
@@ -58,34 +56,34 @@ to quickly create a Cobra application.`,
 			panic(err)
 		}
 		log.Printf("Length of ids.txt : %d", len(ids))
+
 		var (
 			wg        sync.WaitGroup
 			employees []Employee
 		)
-		ch := make(chan Employee)
+		idsChunks := MakeChunksIds(ids)
+		fmt.Printf("Length : %d", len(idsChunks))
+		ch := make(chan []Employee)
 		db, err = sql.Open("mysql", "root:nottheactualpassword@tcp(localhost:3306)/employee?parseTime=true")
 		defer db.Close()
-		db.SetMaxOpenConns(250)
+		db.SetMaxOpenConns(300)
 		db.SetMaxIdleConns(runtime.NumCPU() * 8)
 
 		start := time.Now()
-		bar := pb.StartNew(len(ids))
-		for _, id := range ids {
+
+		bar := pb.StartNew(len(idsChunks))
+		for _, chunk := range idsChunks {
 			wg.Add(1)
-			go func(id int, ch chan Employee) {
+			go func(ids []int, ch chan []Employee) {
 				defer wg.Done()
-				deptManagers := DumpDeptManager(id)
-				titles := DumpTitles(id, deptManagers)
-				salaries := DumpSalaries(id)
-				current, history := DumpDepartments(id)
-				DumpEmployee(id, ch, titles, salaries, current, history)
+				DumpEmployees(ids, ch)
 				bar.Increment()
-			}(id, ch)
+			}(chunk, ch)
 		}
 
 		go func() {
-			for emp := range ch {
-				employees = append(employees, emp)
+			for empSlice := range ch {
+				employees = append(employees, empSlice...)
 			}
 		}()
 
@@ -93,44 +91,45 @@ to quickly create a Cobra application.`,
 		close(ch)
 		bar.Finish()
 
-		chunks := MakeChunks(employees)
+		//chunks := MakeChunks(employees)
 
-		// Declare host and port options to pass to the Connect() method
-		mongoURI := fmt.Sprintf("mongodb://admin:admin@localhost:27017")
-		clientOptions := options.Client().ApplyURI(mongoURI)
+		/*
+			// Declare host and port options to pass to the Connect() method
+			mongoURI := fmt.Sprintf("mongodb://admin:admin@localhost:27017")
+			clientOptions := options.Client().ApplyURI(mongoURI)
 
-		// Connect to MongoDB
-		mgo, err = mongo.Connect(context.TODO(), clientOptions)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		log.Printf("Starting dumping into mongodb")
-
-		ch2 := make(chan int)
-		bar = pb.StartNew(len(chunks))
-		for _, chunk := range chunks {
-			wg.Add(1)
-			go func(chunk []Employee, ch chan int) {
-				defer wg.Done()
-				InsertMany(chunk, ch2)
-				bar.Increment()
-			}(chunk, ch2)
-		}
-
-		var total int = 0
-		go func() {
-			for nbInsert := range ch2 {
-				total += nbInsert
+			// Connect to MongoDB
+			mgo, err = mongo.Connect(context.TODO(), clientOptions)
+			if err != nil {
+				log.Fatal(err)
 			}
-		}()
 
-		wg.Wait()
-		close(ch2)
-		bar.Finish()
+			log.Printf("Starting dumping into mongodb")
 
+			ch2 := make(chan int)
+			bar = pb.StartNew(len(chunks))
+			for _, chunk := range chunks {
+				wg.Add(1)
+				go func(chunk []Employee, ch chan int) {
+					defer wg.Done()
+					InsertMany(chunk, ch2)
+					bar.Increment()
+				}(chunk, ch2)
+			}
+
+			var total int = 0
+			go func() {
+				for nbInsert := range ch2 {
+					total += nbInsert
+				}
+			}()
+
+			wg.Wait()
+			close(ch2)
+			bar.Finish()
+		*/
 		elapsed := time.Since(start)
-		log.Printf("Dumped %d out of %d employees in %s", total, len(employees), elapsed)
+		log.Printf("Dumped %d employees in %s" /* total,*/, len(employees), elapsed)
 	},
 }
 
@@ -253,7 +252,7 @@ func DumpSalaries(id int) []Salary {
 	return salaries
 }
 
-func DumpEmployee(id int, ch chan Employee, titles []Title, salaries []Salary, current Department, history []Department) {
+func DumpEmployee(id int, titles []Title, salaries []Salary, current Department, history []Department) Employee {
 	var (
 		empNo     int
 		birthDate time.Time
@@ -274,7 +273,20 @@ func DumpEmployee(id int, ch chan Employee, titles []Title, salaries []Salary, c
 		}
 	}
 	rows.Close()
-	ch <- Employee{empNo, birthDate, firstName, lastName, gender, hireDate, titles, salaries, current, history}
+	return Employee{empNo, birthDate, firstName, lastName, gender, hireDate, titles, salaries, current, history}
+}
+
+func DumpEmployees(ids []int, ch chan []Employee) {
+	var employees []Employee
+	for _, id := range ids {
+		deptManagers := DumpDeptManager(id)
+		titles := DumpTitles(id, deptManagers)
+		salaries := DumpSalaries(id)
+		current, history := DumpDepartments(id)
+		employee := DumpEmployee(id, titles, salaries, current, history)
+		employees = append(employees, employee)
+	}
+	ch <- employees
 }
 
 func DumpDepartments(id int) (Department, []Department) {
@@ -324,6 +336,37 @@ func MakeChunks(employees []Employee) [][]Employee {
 		}
 
 		divided = append(divided, employees[i:end])
+	}
+
+	var (
+		results []int
+		total   int = 0
+	)
+	for _, i := range divided {
+		results = append(results, len(i))
+	}
+	for _, i := range results {
+		total += i
+	}
+
+	avg := float64(total) / float64(len(results))
+	log.Printf("Created %d chunks of average size : %f", len(divided), avg)
+	return divided
+}
+
+func MakeChunksIds(ids []int) [][]int {
+	var divided [][]int
+
+	chunkSize := len(ids) / 95
+
+	for i := 0; i < len(ids); i += chunkSize {
+		end := i + chunkSize
+
+		if end > len(ids) {
+			end = len(ids)
+		}
+
+		divided = append(divided, ids[i:end])
 	}
 
 	var (
