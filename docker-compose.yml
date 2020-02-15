@@ -17,5 +17,6 @@ services:
             MYSQL_DATABASE: employee
         volumes:
             - ./dump:/dump
+            - ./mysql:/var/lib/mysql
         ports:
             - 3306:3306

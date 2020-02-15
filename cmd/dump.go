@@ -40,6 +40,7 @@ import (
 )
 
 var db *sql.DB
+var mgo *mongo.Client
 
 // dumpCmd represents the dump command
 var dumpCmd = &cobra.Command{
@@ -56,7 +57,6 @@ to quickly create a Cobra application.`,
 		if err != nil {
 			panic(err)
 		}
-		ids = ids[:10000]
 		log.Printf("Length of ids.txt : %d", len(ids))
 		var (
 			wg        sync.WaitGroup
@@ -69,7 +69,6 @@ to quickly create a Cobra application.`,
 		db.SetMaxIdleConns(runtime.NumCPU() * 8)
 
 		start := time.Now()
-		total := 0
 		bar := pb.StartNew(len(ids))
 		for _, id := range ids {
 			wg.Add(1)
@@ -80,7 +79,6 @@ to quickly create a Cobra application.`,
 				salaries := DumpSalaries(id)
 				current, history := DumpDepartments(id)
 				DumpEmployee(id, ch, titles, salaries, current, history)
-				total++
 				bar.Increment()
 			}(id, ch)
 		}
@@ -94,13 +92,45 @@ to quickly create a Cobra application.`,
 		wg.Wait()
 		close(ch)
 		bar.Finish()
-		fmt.Println()
-		//ToJson(employees)
-		log.Printf("Starting dumping into mongodb")
-		//InsertMany(employees)
-		elapsed := time.Since(start)
 
-		log.Printf("Dumped %d employees in %s", len(employees), elapsed)
+		chunks := MakeChunks(employees)
+
+		// Declare host and port options to pass to the Connect() method
+		mongoURI := fmt.Sprintf("mongodb://admin:admin@localhost:27017")
+		clientOptions := options.Client().ApplyURI(mongoURI)
+
+		// Connect to MongoDB
+		mgo, err = mongo.Connect(context.TODO(), clientOptions)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		log.Printf("Starting dumping into mongodb")
+
+		ch2 := make(chan int)
+		bar = pb.StartNew(len(chunks))
+		for _, chunk := range chunks {
+			wg.Add(1)
+			go func(chunk []Employee, ch chan int) {
+				defer wg.Done()
+				InsertMany(chunk, ch2)
+				bar.Increment()
+			}(chunk, ch2)
+		}
+
+		var total int = 0
+		go func() {
+			for nbInsert := range ch2 {
+				total += nbInsert
+			}
+		}()
+
+		wg.Wait()
+		close(ch2)
+		bar.Finish()
+
+		elapsed := time.Since(start)
+		log.Printf("Dumped %d out of %d employees in %s", total, len(employees), elapsed)
 	},
 }
 
@@ -280,29 +310,49 @@ func DumpDepartments(id int) (Department, []Department) {
 	return current, history
 }
 
-func InsertMany(employees []Employee) {
-	// Declare host and port options to pass to the Connect() method
-	mongoURI := fmt.Sprintf("mongodb://%s:%s@localhost:27017", os.Getenv("MONGO_USER"), os.Getenv("MONGO_PASSWORD"))
-	clientOptions := options.Client().ApplyURI(mongoURI)
+func MakeChunks(employees []Employee) [][]Employee {
+	var divided [][]Employee
+	numCPU := runtime.NumCPU()
 
-	// Connect to the MongoDB and return Client instance
-	client, err := mongo.Connect(context.TODO(), clientOptions)
-	if err != nil {
-		fmt.Println("mongo.Connect() ERROR:", err)
-		os.Exit(1)
+	chunkSize := (len(employees) + numCPU - 1) / numCPU
+
+	for i := 0; i < len(employees); i += chunkSize {
+		end := i + chunkSize
+
+		if end > len(employees) {
+			end = len(employees)
+		}
+
+		divided = append(divided, employees[i:end])
 	}
 
+	var (
+		results []int
+		total   int = 0
+	)
+	for _, i := range divided {
+		results = append(results, len(i))
+	}
+	for _, i := range results {
+		total += i
+	}
+
+	avg := float64(total) / float64(len(results))
+	log.Printf("Created %d chunks of average size : %f", len(divided), avg)
+	return divided
+}
+
+func InsertMany(chunk []Employee, ch chan int) {
 	// Access a MongoDB collection through a database
-	col := client.Database("employee").Collection("employees")
+	col := mgo.Database("employee").Collection("employees")
 
 	var emps []interface{}
-	for _, emp := range employees {
+	for _, emp := range chunk {
 		emps = append(emps, emp)
 	}
-
 	insertResult, err := col.InsertMany(context.TODO(), emps)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("Inserted %d documents", len(insertResult.InsertedIDs))
+	ch <- len(insertResult.InsertedIDs)
 }
